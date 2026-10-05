@@ -22,7 +22,7 @@ eksternal.
 - Terjemahan visual langsung pada jendela video.
 - Text-to-Speech offline menggunakan `pyttsx3`.
 - Thread khusus suara agar tampilan video tidak freeze atau lagging.
-- Cooldown suara untuk mencegah output berulang terlalu cepat.
+- Cooldown suara 3 detik untuk mencegah output berulang terlalu cepat.
 - Stabilizer frame untuk mengurangi kedipan hasil deteksi.
 - Antarmuka visual dengan feedback, status TTS, FPS, dan instruksi keyboard.
 
@@ -108,6 +108,7 @@ Setelah jendela kamera terbuka:
 - Tunjukkan satu tangan ke arah webcam.
 - Pastikan tangan berada di area yang cukup terang.
 - Tunggu sampai gestur stabil beberapa frame.
+- Tahan gestur jika ingin suara mengulang setiap sekitar 3 detik.
 - Tekan `Q` untuk keluar.
 - Tekan `R` untuk mereset gestur dan mengulangi suara.
 

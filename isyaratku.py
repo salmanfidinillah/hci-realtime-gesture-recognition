@@ -602,9 +602,13 @@ def main():
                     "Halo", "Tunggu", "Oke", "Damai", "Tunjuk"
                 }
 
-                # Hanya ucapkan ketika gestur stabil berubah. Ini mencegah
-                # pengulangan suara walaupun cooldown sudah selesai.
-                if is_valid_gesture and stable_gesture != last_spoken_gesture and can_speak:
+                # Ucapkan ketika gestur berubah atau ketika pose yang sama
+                # masih ditahan setelah cooldown selesai. Dengan pola ini,
+                # pengguna mendapat feedback suara berkala tanpa spam setiap
+                # frame video.
+                gesture_changed = stable_gesture != last_spoken_gesture
+                cooldown_finished = current_time - last_spoken_at >= SPEECH_COOLDOWN_SECONDS
+                if is_valid_gesture and can_speak and (gesture_changed or cooldown_finished):
                     speech_worker.speak(stable_gesture)
                     last_spoken_gesture = stable_gesture
                     last_spoken_at = current_time
