@@ -23,6 +23,15 @@ from threading import Event, Thread
 # Time digunakan untuk menerapkan cooldown suara dan menghitung FPS.
 from time import perf_counter
 
+# Path dan tempfile digunakan untuk menyimpan model MediaPipe Tasks di cache
+# sistem, sehingga file model tidak perlu ikut dimasukkan ke repository.
+from pathlib import Path
+from tempfile import gettempdir
+
+# urllib hanya dipakai jika MediaPipe versi baru membutuhkan model hand
+# landmarker. Text-to-Speech tetap berjalan offline.
+from urllib.request import urlretrieve
+
 import cv2
 import mediapipe as mp
 import pyttsx3
@@ -47,6 +56,14 @@ SPEECH_COOLDOWN_SECONDS = 3.0
 # Jumlah frame berturut-turut yang harus memiliki hasil sama sebelum sebuah
 # gestur dianggap stabil. Ini membantu mengurangi kedipan label karena noise.
 STABLE_FRAMES_REQUIRED = 5
+
+# MediaPipe 0.10.30+ dapat menggunakan API Tasks dan model resmi ini ketika
+# API lama mp.solutions tidak tersedia.
+HAND_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+    "hand_landmarker/float16/1/hand_landmarker.task"
+)
+HAND_MODEL_PATH = Path(gettempdir()) / "isyaratku_hand_landmarker.task"
 
 # Warna antarmuka OpenCV menggunakan format BGR, bukan RGB.
 COLOR_WHITE = (255, 255, 255)
@@ -177,10 +194,19 @@ class SpeechWorker:
 
 def is_thumb_open(hand_landmarks, handedness_label):
     """Menentukan apakah ibu jari terbuka berdasarkan arah koordinat X."""
+    # API MediaPipe lama mengemas landmark di atribut .landmark, sedangkan
+    # API Tasks mengembalikannya sebagai list langsung. Normalisasi ini
+    # membuat kedua versi dapat dipakai oleh logika heuristik yang sama.
+    landmarks = (
+        hand_landmarks.landmark
+        if hasattr(hand_landmarks, "landmark")
+        else hand_landmarks
+    )
+
     # Landmark ibu jari yang digunakan:
     # 4 = ujung jari dan 3 = sendi terakhir sebelum ujung jari.
-    thumb_tip = hand_landmarks.landmark[4]
-    thumb_ip = hand_landmarks.landmark[3]
+    thumb_tip = landmarks[4]
+    thumb_ip = landmarks[3]
 
     # Arah horizontal ibu jari bergantung pada tangan kiri atau kanan.
     # Toleransi kecil mengurangi perubahan status akibat getaran tangan.
@@ -200,7 +226,13 @@ def get_finger_states(hand_landmarks, handedness_label):
     ujung jari lebih kecil daripada koordinat Y sendi PIP. Pada gambar OpenCV,
     nilai Y yang lebih kecil berarti posisi yang lebih tinggi di layar.
     """
-    landmarks = hand_landmarks.landmark
+    # Normalisasi format landmark untuk kompatibilitas MediaPipe lama dan
+    # MediaPipe Tasks versi baru.
+    landmarks = (
+        hand_landmarks.landmark
+        if hasattr(hand_landmarks, "landmark")
+        else hand_landmarks
+    )
 
     # Ibu jari bergerak terutama ke arah samping, sehingga dibandingkan pada
     # sumbu X melalui fungsi khusus di atas.
@@ -333,6 +365,141 @@ def open_camera():
     return cv2.VideoCapture(CAMERA_INDEX)
 
 
+def ensure_hand_model():
+    """Menyiapkan model Hand Landmarker saat API Tasks diperlukan."""
+    # Jika model sudah pernah diunduh, langsung gunakan cache agar startup
+    # berikutnya lebih cepat dan tidak membutuhkan koneksi internet lagi.
+    if HAND_MODEL_PATH.exists() and HAND_MODEL_PATH.stat().st_size > 100_000:
+        return str(HAND_MODEL_PATH)
+
+    print("[INFO] Mengunduh model MediaPipe Hand Landmarker sekali saja...")
+    try:
+        urlretrieve(HAND_MODEL_URL, HAND_MODEL_PATH)
+    except Exception as error:
+        raise RuntimeError(
+            "Model MediaPipe gagal diunduh. Periksa koneksi internet lalu coba lagi."
+        ) from error
+
+    return str(HAND_MODEL_PATH)
+
+
+def get_landmark_list(hand_landmarks):
+    """Mengubah object/list landmark menjadi list titik yang seragam."""
+    return (
+        hand_landmarks.landmark
+        if hasattr(hand_landmarks, "landmark")
+        else hand_landmarks
+    )
+
+
+def draw_hand_landmarks(frame, hand_landmarks, connections):
+    """Menggambar titik dan koneksi tangan untuk API MediaPipe apa pun."""
+    landmarks = get_landmark_list(hand_landmarks)
+    height, width = frame.shape[:2]
+    points = [
+        (int(landmark.x * width), int(landmark.y * height))
+        for landmark in landmarks
+    ]
+
+    # Koneksi API lama berbentuk tuple, sementara API Tasks memakai object
+    # Connection dengan atribut start/end.
+    for connection in connections:
+        if hasattr(connection, "start"):
+            start, end = connection.start, connection.end
+        else:
+            start, end = connection
+        cv2.line(frame, points[start], points[end], COLOR_CYAN, 2, cv2.LINE_AA)
+
+    # Titik landmark diberi warna hijau agar struktur tangan mudah diamati.
+    for point in points:
+        cv2.circle(frame, point, 4, COLOR_GREEN, -1, cv2.LINE_AA)
+
+
+class LegacyHandDetector:
+    """Adapter untuk MediaPipe lama yang masih memiliki mp.solutions.hands."""
+
+    def __init__(self):
+        self._hands = mp.solutions.hands.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            model_complexity=0,
+            min_detection_confidence=0.65,
+            min_tracking_confidence=0.65,
+        )
+        self.connections = mp.solutions.hands.HAND_CONNECTIONS
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._hands.close()
+
+    def process(self, rgb_frame):
+        return self._hands.process(rgb_frame)
+
+
+class TasksHandDetector:
+    """Adapter untuk MediaPipe baru yang menyediakan API Tasks."""
+
+    def __init__(self):
+        # Import lokal menjaga kompatibilitas dengan instalasi MediaPipe lama.
+        from mediapipe.tasks import python as mp_tasks
+        from mediapipe.tasks.python import vision
+
+        model_path = ensure_hand_model()
+        base_options = mp_tasks.BaseOptions(model_asset_path=model_path)
+        options = vision.HandLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.IMAGE,
+            num_hands=1,
+            min_hand_detection_confidence=0.65,
+            min_hand_presence_confidence=0.65,
+            min_tracking_confidence=0.65,
+        )
+        self._detector = vision.HandLandmarker.create_from_options(options)
+        self.connections = vision.HandLandmarksConnections.HAND_CONNECTIONS
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._detector.close()
+
+    def process(self, rgb_frame):
+        # MediaPipe Tasks menerima object Image dengan data RGB.
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        return self._detector.detect(image)
+
+
+def create_hand_detector():
+    """Memilih adapter sesuai API MediaPipe yang terpasang."""
+    if hasattr(mp, "solutions") and hasattr(mp.solutions, "hands"):
+        return LegacyHandDetector()
+
+    return TasksHandDetector()
+
+
+def extract_first_hand(results):
+    """Mengambil landmark dan label tangan dari hasil API lama atau Tasks."""
+    # Format MediaPipe lama.
+    if getattr(results, "multi_hand_landmarks", None):
+        hand_landmarks = results.multi_hand_landmarks[0]
+        handedness_label = "Right"
+        if getattr(results, "multi_handedness", None):
+            handedness_label = results.multi_handedness[0].classification[0].label
+        return hand_landmarks, handedness_label
+
+    # Format MediaPipe Tasks baru.
+    if getattr(results, "hand_landmarks", None):
+        hand_landmarks = results.hand_landmarks[0]
+        handedness_label = "Right"
+        if getattr(results, "handedness", None) and results.handedness[0]:
+            handedness_label = results.handedness[0][0].category_name
+        return hand_landmarks, handedness_label
+
+    return None, "Right"
+
+
 # ---------------------------------------------------------------------------
 # PROGRAM UTAMA
 # ---------------------------------------------------------------------------
@@ -352,11 +519,6 @@ def main():
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
 
-    # Alias pendek agar kode deteksi lebih mudah dibaca.
-    mp_hands = mp.solutions.hands
-    mp_drawing = mp.solutions.drawing_utils
-    mp_drawing_styles = mp.solutions.drawing_styles
-
     # Worker suara dimulai satu kali dan dipakai sepanjang aplikasi berjalan.
     speech_worker = SpeechWorker()
     speech_worker.start()
@@ -371,15 +533,9 @@ def main():
     fps = 0.0
 
     try:
-        # MediaPipe Hands mendeteksi maksimal satu tangan agar fokus prototipe
-        # tetap sederhana dan hasil gesture tidak ambigu.
-        with mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=1,
-            model_complexity=0,
-            min_detection_confidence=0.65,
-            min_tracking_confidence=0.65,
-        ) as hands:
+        # Adapter memilih API MediaPipe lama atau Tasks secara otomatis agar
+        # script tetap runnable pada beberapa generasi versi MediaPipe.
+        with create_hand_detector() as hands:
             while True:
                 # Membaca satu frame dari webcam.
                 success, frame = camera.read()
@@ -407,23 +563,12 @@ def main():
 
                 detected_gesture = "Tidak dikenali"
 
-                if results.multi_hand_landmarks:
-                    hand_landmarks = results.multi_hand_landmarks[0]
+                hand_landmarks, handedness_label = extract_first_hand(results)
+
+                if hand_landmarks is not None:
 
                     # Menggambar skeleton tangan sebagai feedback visual.
-                    mp_drawing.draw_landmarks(
-                        frame,
-                        hand_landmarks,
-                        mp_hands.HAND_CONNECTIONS,
-                        mp_drawing_styles.get_default_hand_landmarks_style(),
-                        mp_drawing_styles.get_default_hand_connections_style(),
-                    )
-
-                    # Label handedness membantu logika ibu jari mengetahui arah
-                    # horizontal yang benar untuk tangan kiri atau kanan.
-                    handedness_label = "Right"
-                    if results.multi_handedness:
-                        handedness_label = results.multi_handedness[0].classification[0].label
+                    draw_hand_landmarks(frame, hand_landmarks, hands.connections)
 
                     finger_states = get_finger_states(hand_landmarks, handedness_label)
                     detected_gesture = classify_gesture(finger_states)

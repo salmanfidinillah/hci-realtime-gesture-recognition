@@ -111,6 +111,10 @@ Setelah jendela kamera terbuka:
 - Tekan `Q` untuk keluar.
 - Tekan `R` untuk mereset gestur dan mengulangi suara.
 
+Pada penggunaan pertama, program dapat mengunduh model Hand Landmarker resmi
+MediaPipe sekitar 8 MB ke cache sementara sistem. Setelah itu model digunakan
+secara lokal sehingga startup berikutnya tidak perlu mengunduh ulang.
+
 Jika webcam tidak terbuka, ubah nilai berikut pada bagian konfigurasi
 `isyaratku.py`:
 
@@ -137,7 +141,9 @@ tangan, jarak dari kamera, resolusi webcam, dan variasi bentuk tangan.
 
 Thread Text-to-Speech diinisialisasi secara terpisah dari thread video. Pada
 Windows, program juga mencoba menginisialisasi COM di thread suara untuk
-mengurangi kemungkinan error pada driver SAPI5.
+mengurangi kemungkinan error pada driver SAPI5. Script juga memiliki adapter
+kompatibilitas untuk MediaPipe lama (`mp.solutions.hands`) dan MediaPipe baru
+(Tasks API), sehingga tetap dapat dijalankan pada beberapa versi library.
 
 ## Disclaimer Akademik
 
